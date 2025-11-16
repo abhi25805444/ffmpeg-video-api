@@ -425,10 +425,11 @@ def create_original_photo_segment(original_image: Path, output_path: Path, fps: 
 
         # Scale to fit within 1080x1344 (70% of screen height), then pad to 1080x1920
         # Zoom from 1.0 to 1.08 over 2 seconds
+        # Pre-calculate zoom rate: 0.08/2 = 0.04 per second
         video_filter = (
             f"scale=1080:1344:force_original_aspect_ratio=decrease,"
             f"pad=1080:1920:(ow-iw)/2:(oh-ih)/2:black,"
-            f"zoompan=z='1+0.08*t/2':d={2*fps}:s=1080x1920:fps={fps},"
+            f"zoompan=z='1+0.04*t':d={2*fps}:s=1080x1920:fps={fps},"
             f"drawtext=text='{text}':"
             f"fontfile=/Windows/Fonts/arialbd.ttf:fontsize=80:fontcolor=white:"
             f"borderw=4:bordercolor=black:"
@@ -558,10 +559,12 @@ def create_results_showcase(
                 text_counter = escape_ffmpeg_text(counter_text)
 
                 # Ken Burns effect: slow zoom from 1.0 to 1.05
+                # Pre-calculate zoom rate: 0.05/duration_per_image per second
+                zoom_rate = 0.05 / duration_per_image
                 video_filter = (
                     f"scale=1080:1920:force_original_aspect_ratio=increase,"
                     f"crop=1080:1920,"
-                    f"zoompan=z='1+0.05*t/{duration_per_image}':d={duration_per_image*fps}:s=1080x1920:fps={fps},"
+                    f"zoompan=z='1+{zoom_rate}*t':d={duration_per_image*fps}:s=1080x1920:fps={fps},"
                     f"drawtext=text='{text_style}':"
                     f"fontfile=/Windows/Fonts/arialbd.ttf:fontsize=64:fontcolor=white:"
                     f"borderw=3:bordercolor=black:"
