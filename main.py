@@ -325,50 +325,82 @@ def create_hook_grid(result_images: List[Path], output_path: Path, fps: int = 30
         for i in range(4):
             grid_images.append(result_images[i % len(result_images)])
 
-        # Create filter complex for 2x2 grid with zoom effects
-        # Each cell is 540x960, total video is 1080x1920
-        # Simplified approach: apply continuous zoom throughout 1 second
-        filter_parts = []
+        # Create temp directory for individual cell videos
+        temp_dir = output_path.parent / f"grid_temp_{uuid.uuid4().hex[:8]}"
+        temp_dir.mkdir(exist_ok=True)
 
-        for i, img_path in enumerate(grid_images):
-            # Prepare each image: scale to 540x960, add simple zoom effect
-            # Zoom from 1.0 to 1.1 over the full 1 second duration
-            filter_parts.append(
-                f"[{i}:v]scale=540:960:force_original_aspect_ratio=increase,"
-                f"crop=540:960,"
-                f"zoompan=z='1+0.1*t':d={fps}:s=540x960:fps={fps}[v{i}]"
+        try:
+            # Create individual videos for each grid cell with zoom effect
+            cell_videos = []
+            for i, img_path in enumerate(grid_images):
+                cell_video = temp_dir / f"cell_{i}.mp4"
+                cell_videos.append(cell_video)
+
+                # Simple approach: scale to fit cell size with slight enlargement for visual interest
+                # We'll create static cells first - zoom can be added later if needed
+                video_filter = (
+                    f"scale=594:1056:force_original_aspect_ratio=increase,"  # Scale to 1.1x size
+                    f"crop=540:960"  # Crop to final cell size (creates slight zoom effect)
+                )
+
+                cmd = [
+                    "ffmpeg", "-y",
+                    "-loop", "1",
+                    "-t", "1",
+                    "-i", str(img_path),
+                    "-vf", video_filter,
+                    "-c:v", "libx264",
+                    "-pix_fmt", "yuv420p",
+                    "-preset", "ultrafast",
+                    "-crf", "23",
+                    "-r", str(fps),
+                    str(cell_video)
+                ]
+
+                logger.info(f"Creating grid cell {i+1}/4")
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+
+                if result.returncode != 0:
+                    logger.error(f"Cell {i} creation failed: {result.stderr}")
+                    return False
+
+            # Now combine the 4 cell videos into a 2x2 grid
+            filter_complex = (
+                f"[0:v][1:v]hstack=inputs=2[top];"
+                f"[2:v][3:v]hstack=inputs=2[bottom];"
+                f"[top][bottom]vstack=inputs=2[v]"
             )
 
-        # Stack into 2x2 grid
-        filter_complex = ";".join(filter_parts)
-        filter_complex += f";[v0][v1]hstack=inputs=2[top];[v2][v3]hstack=inputs=2[bottom];[top][bottom]vstack=inputs=2[v]"
+            cmd = [
+                "ffmpeg", "-y",
+                "-i", str(cell_videos[0]),
+                "-i", str(cell_videos[1]),
+                "-i", str(cell_videos[2]),
+                "-i", str(cell_videos[3]),
+                "-filter_complex", filter_complex,
+                "-map", "[v]",
+                "-c:v", "libx264",
+                "-pix_fmt", "yuv420p",
+                "-preset", "medium",
+                "-crf", "23",
+                "-r", str(fps),
+                "-t", "1",
+                str(output_path)
+            ]
 
-        cmd = [
-            "ffmpeg", "-y",
-            "-loop", "1", "-t", "1", "-i", str(grid_images[0]),
-            "-loop", "1", "-t", "1", "-i", str(grid_images[1]),
-            "-loop", "1", "-t", "1", "-i", str(grid_images[2]),
-            "-loop", "1", "-t", "1", "-i", str(grid_images[3]),
-            "-filter_complex", filter_complex,
-            "-map", "[v]",
-            "-c:v", "libx264",
-            "-pix_fmt", "yuv420p",
-            "-preset", "medium",
-            "-crf", "23",
-            "-r", str(fps),
-            "-t", "1",
-            str(output_path)
-        ]
+            logger.info(f"Combining grid cells into 2x2 layout")
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
 
-        logger.info(f"Running hook grid FFmpeg command")
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+            if result.returncode != 0:
+                logger.error(f"Grid combination failed: {result.stderr}")
+                return False
 
-        if result.returncode != 0:
-            logger.error(f"Hook grid creation failed: {result.stderr}")
-            return False
+            logger.info(f"Hook grid created: {output_path}")
+            return True
 
-        logger.info(f"Hook grid created: {output_path}")
-        return True
+        finally:
+            # Cleanup temp directory
+            shutil.rmtree(temp_dir, ignore_errors=True)
 
     except Exception as e:
         logger.error(f"Error creating hook grid: {e}")
