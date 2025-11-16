@@ -18,6 +18,7 @@ import mimetypes
 import json
 from PIL import Image
 import re
+import gc
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -44,15 +45,16 @@ OUTPUT_DIR = Path("outputs")
 UPLOAD_DIR.mkdir(exist_ok=True)
 OUTPUT_DIR.mkdir(exist_ok=True)
 
-# Configuration
-MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB per file
-MAX_IMAGES = 10
+# Configuration - Optimized for 512MB memory
+MAX_FILE_SIZE = 5 * 1024 * 1024  # 5MB per file (reduced for low memory)
+MAX_IMAGES = 6  # Reduced from 10 for memory constraints
 SUPPORTED_IMAGE_FORMATS = {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp"}
 SUPPORTED_AUDIO_FORMATS = {".mp3", ".wav", ".m4a", ".aac", ".ogg"}
 MAX_URL_LENGTH = 2048
-MIN_IMAGE_DIMENSION = 800  # Minimum width or height
-DOWNLOAD_TIMEOUT = 120  # seconds
-VIDEO_TIMEOUT = 300  # seconds for video processing
+MIN_IMAGE_DIMENSION = 640  # Reduced from 800 for memory
+DOWNLOAD_TIMEOUT = 90  # seconds
+VIDEO_TIMEOUT = 180  # seconds for video processing
+DOWNLOAD_CHUNK_SIZE = 4096  # Smaller chunks for low memory
 
 # Pydantic models for the new endpoint
 class VideoGenerationRequest(BaseModel):
@@ -154,10 +156,10 @@ async def download_image_from_url(session: aiohttp.ClientSession, url: str, dest
                 logger.error(f"Image too large: {content_length} bytes")
                 return {"success": False, "error": f"Image too large: {content_length} bytes"}
 
-            # Download and save
+            # Download and save with smaller chunks for memory efficiency
             async with aiofiles.open(destination, 'wb') as f:
                 total_size = 0
-                async for chunk in response.content.iter_chunked(8192):
+                async for chunk in response.content.iter_chunked(DOWNLOAD_CHUNK_SIZE):
                     total_size += len(chunk)
                     if total_size > MAX_FILE_SIZE:
                         logger.error(f"Image too large during download: {total_size} bytes")
@@ -256,10 +258,10 @@ async def download_audio_from_url(session: aiohttp.ClientSession, url: str, dest
                 logger.error(f"Audio too large: {content_length} bytes")
                 return False
 
-            # Download and save
+            # Download and save with smaller chunks for memory efficiency
             async with aiofiles.open(destination, 'wb') as f:
                 total_size = 0
-                async for chunk in response.content.iter_chunked(8192):
+                async for chunk in response.content.iter_chunked(DOWNLOAD_CHUNK_SIZE):
                     total_size += len(chunk)
                     if total_size > MAX_FILE_SIZE:
                         logger.error(f"Audio too large during download: {total_size} bytes")
@@ -352,8 +354,9 @@ def create_hook_grid(result_images: List[Path], output_path: Path, fps: int = 30
                     "-c:v", "libx264",
                     "-pix_fmt", "yuv420p",
                     "-preset", "ultrafast",
-                    "-crf", "23",
+                    "-crf", "28",
                     "-r", str(fps),
+                    "-threads", "2",
                     str(cell_video)
                 ]
 
@@ -363,6 +366,9 @@ def create_hook_grid(result_images: List[Path], output_path: Path, fps: int = 30
                 if result.returncode != 0:
                     logger.error(f"Cell {i} creation failed: {result.stderr}")
                     return False
+
+            # Force garbage collection after creating cells
+            gc.collect()
 
             # Now combine the 4 cell videos into a 2x2 grid
             filter_complex = (
@@ -381,10 +387,11 @@ def create_hook_grid(result_images: List[Path], output_path: Path, fps: int = 30
                 "-map", "[v]",
                 "-c:v", "libx264",
                 "-pix_fmt", "yuv420p",
-                "-preset", "medium",
-                "-crf", "23",
+                "-preset", "ultrafast",
+                "-crf", "28",
                 "-r", str(fps),
                 "-t", "1",
+                "-threads", "2",
                 str(output_path)
             ]
 
@@ -436,9 +443,10 @@ def create_original_photo_segment(original_image: Path, output_path: Path, fps: 
             "-vf", video_filter,
             "-c:v", "libx264",
             "-pix_fmt", "yuv420p",
-            "-preset", "medium",
-            "-crf", "23",
+            "-preset", "ultrafast",
+            "-crf", "28",
             "-r", str(fps),
+            "-threads", "2",
             str(output_path)
         ]
 
@@ -490,9 +498,10 @@ def create_prompt_tease_segment(original_image: Path, prompt_text: str, output_p
             "-vf", video_filter,
             "-c:v", "libx264",
             "-pix_fmt", "yuv420p",
-            "-preset", "medium",
-            "-crf", "23",
+            "-preset", "ultrafast",
+            "-crf", "28",
             "-r", str(fps),
+            "-threads", "2",
             str(output_path)
         ]
 
@@ -571,9 +580,10 @@ def create_results_showcase(
                     "-vf", video_filter,
                     "-c:v", "libx264",
                     "-pix_fmt", "yuv420p",
-                    "-preset", "medium",
-                    "-crf", "23",
+                    "-preset", "ultrafast",
+                    "-crf", "28",
                     "-r", str(fps),
+                    "-threads", "2",
                     str(temp_video)
                 ]
 
@@ -583,6 +593,9 @@ def create_results_showcase(
                 if result.returncode != 0:
                     logger.error(f"Error creating result video {i}: {result.stderr}")
                     return False
+
+            # Force garbage collection after creating all result videos
+            gc.collect()
 
             # Concatenate with xfade transitions
             if len(temp_videos) == 1:
@@ -617,9 +630,10 @@ def create_results_showcase(
                     "-map", "[v]",
                     "-c:v", "libx264",
                     "-pix_fmt", "yuv420p",
-                    "-preset", "medium",
-                    "-crf", "23",
+                    "-preset", "ultrafast",
+                    "-crf", "28",
                     "-r", str(fps),
+                    "-threads", "2",
                     str(output_path)
                 ]
 
@@ -684,10 +698,11 @@ def create_branding_segment(last_result_image: Path, logo_path: Optional[Path], 
                 "-map", "[v]",
                 "-c:v", "libx264",
                 "-pix_fmt", "yuv420p",
-                "-preset", "medium",
-                "-crf", "23",
+                "-preset", "ultrafast",
+                "-crf", "28",
                 "-r", str(fps),
                 "-t", "2",
+                "-threads", "2",
                 str(output_path)
             ]
         else:
@@ -699,9 +714,10 @@ def create_branding_segment(last_result_image: Path, logo_path: Optional[Path], 
                 "-vf", video_filter,
                 "-c:v", "libx264",
                 "-pix_fmt", "yuv420p",
-                "-preset", "medium",
-                "-crf", "23",
+                "-preset", "ultrafast",
+                "-crf", "28",
                 "-r", str(fps),
+                "-threads", "2",
                 str(output_path)
             ]
 
@@ -760,10 +776,11 @@ def create_cta_segment(last_result_image: Path, cta_text: str, logo_path: Option
                 f"[v]{text_filter}",
                 "-c:v", "libx264",
                 "-pix_fmt", "yuv420p",
-                "-preset", "medium",
-                "-crf", "23",
+                "-preset", "ultrafast",
+                "-crf", "28",
                 "-r", str(fps),
                 "-t", "1",
+                "-threads", "2",
                 str(output_path)
             ]
         else:
@@ -775,9 +792,10 @@ def create_cta_segment(last_result_image: Path, cta_text: str, logo_path: Option
                 "-vf", f"{base_filter},{text_filter}",
                 "-c:v", "libx264",
                 "-pix_fmt", "yuv420p",
-                "-preset", "medium",
-                "-crf", "23",
+                "-preset", "ultrafast",
+                "-crf", "28",
                 "-r", str(fps),
+                "-threads", "2",
                 str(output_path)
             ]
 
@@ -1069,6 +1087,7 @@ def create_inspix_video(
             if not create_hook_grid(result_images, segment1, fps):
                 raise Exception("Failed to create hook grid segment")
             segments.append(segment1)
+            gc.collect()  # Free memory after segment creation
 
             # [1-3s] Original Photo
             logger.info("Creating segment 2/6: Original Photo [1-3s]")
@@ -1076,6 +1095,7 @@ def create_inspix_video(
             if not create_original_photo_segment(original_image, segment2, fps):
                 raise Exception("Failed to create original photo segment")
             segments.append(segment2)
+            gc.collect()  # Free memory after segment creation
 
             # [3-5s] Prompt Tease
             logger.info("Creating segment 3/6: Prompt Tease [3-5s]")
@@ -1083,6 +1103,7 @@ def create_inspix_video(
             if not create_prompt_tease_segment(original_image, prompt_text, segment3, fps):
                 raise Exception("Failed to create prompt tease segment")
             segments.append(segment3)
+            gc.collect()  # Free memory after segment creation
 
             # [5-12s] Results Showcase
             logger.info("Creating segment 4/6: Results Showcase [5-12s]")
@@ -1090,6 +1111,7 @@ def create_inspix_video(
             if not create_results_showcase(result_images, style_names, segment4, fps):
                 raise Exception("Failed to create results showcase segment")
             segments.append(segment4)
+            gc.collect()  # Free memory after segment creation
 
             # [12-14s] Branding
             logger.info("Creating segment 5/6: Branding [12-14s]")
@@ -1098,6 +1120,7 @@ def create_inspix_video(
             if not create_branding_segment(last_result, logo_path, segment5, fps):
                 raise Exception("Failed to create branding segment")
             segments.append(segment5)
+            gc.collect()  # Free memory after segment creation
 
             # [14-15s] Call-to-Action
             logger.info("Creating segment 6/6: CTA [14-15s]")
@@ -1105,6 +1128,7 @@ def create_inspix_video(
             if not create_cta_segment(last_result, cta_text, logo_path, segment6, fps):
                 raise Exception("Failed to create CTA segment")
             segments.append(segment6)
+            gc.collect()  # Free memory after segment creation
 
             # Concatenate all segments
             logger.info("Concatenating all segments into final video")
@@ -1124,12 +1148,13 @@ def create_inspix_video(
                 "-i", "anullsrc=channel_layout=stereo:sample_rate=44100",
                 "-c:v", "libx264",
                 "-c:a", "aac",
-                "-b:a", "128k",
+                "-b:a", "96k",
                 "-pix_fmt", "yuv420p",
-                "-preset", "medium",
-                "-crf", "23",
+                "-preset", "ultrafast",
+                "-crf", "28",
                 "-shortest",
                 "-movflags", "+faststart",
+                "-threads", "2",
                 str(output_path)
             ]
 
@@ -1235,12 +1260,14 @@ async def generate_inspix_video(request: VideoGenerationRequest):
     [12-14s] Branding - Show branding message with logo
     [14-15s] Call-to-Action - Display CTA text
 
-    Technical Specs:
+    Technical Specs (Optimized for 512MB memory):
     - Resolution: 1080x1920 (9:16)
-    - Frame Rate: 30fps
-    - Codec: H.264 (libx264)
+    - Frame Rate: 24fps (reduced for memory efficiency)
+    - Codec: H.264 (libx264, ultrafast preset)
     - Audio: Silent AAC track (Instagram compatible)
     - Duration: Exactly 15 seconds
+    - Max Images: 6 result images
+    - Max File Size: 5MB per image
     """
 
     # Check FFmpeg availability
@@ -1260,10 +1287,10 @@ async def generate_inspix_video(request: VideoGenerationRequest):
             detail="At least one result image URL is required"
         )
 
-    if len(request.result_image_urls) > 10:
+    if len(request.result_image_urls) > MAX_IMAGES:
         raise HTTPException(
             status_code=400,
-            detail="Maximum 10 result images allowed"
+            detail=f"Maximum {MAX_IMAGES} result images allowed (memory constraint)"
         )
 
     # Validate URL formats
@@ -1341,6 +1368,9 @@ async def generate_inspix_video(request: VideoGenerationRequest):
 
                 result_image_paths.append(result_path)
 
+            # Force garbage collection after downloading images
+            gc.collect()
+
             # Download logo if provided
             logo_path = None
             if request.logo_url:
@@ -1358,7 +1388,7 @@ async def generate_inspix_video(request: VideoGenerationRequest):
         output_filename = f"inspix_{request_id}.mp4"
         output_path = OUTPUT_DIR / output_filename
 
-        logger.info("Starting video generation")
+        logger.info("Starting video generation (low memory mode)")
         success = create_inspix_video(
             original_image=original_image_path,
             result_images=result_image_paths,
@@ -1367,7 +1397,7 @@ async def generate_inspix_video(request: VideoGenerationRequest):
             style_names=request.style_names,
             logo_path=logo_path,
             cta_text=request.custom_cta_text,
-            fps=30
+            fps=24  # Reduced from 30 for memory efficiency
         )
 
         if not success:
@@ -1376,8 +1406,9 @@ async def generate_inspix_video(request: VideoGenerationRequest):
                 detail="Failed to generate video"
             )
 
-        # Clean up downloaded files
+        # Clean up downloaded files and force garbage collection
         shutil.rmtree(request_dir, ignore_errors=True)
+        gc.collect()
 
         if not output_path.exists():
             raise HTTPException(
@@ -1398,7 +1429,7 @@ async def generate_inspix_video(request: VideoGenerationRequest):
             "file_size_mb": round(file_size_mb, 2),
             "duration_seconds": 15,
             "resolution": "1080x1920",
-            "fps": 30,
+            "fps": 24,
             "format": "mp4",
             "codec": "H.264",
             "audio": "AAC (silent)",
@@ -1410,12 +1441,14 @@ async def generate_inspix_video(request: VideoGenerationRequest):
         }
 
     except HTTPException:
-        # Clean up on error
+        # Clean up on error and free memory
         shutil.rmtree(request_dir, ignore_errors=True)
+        gc.collect()
         raise
     except Exception as e:
-        # Clean up on error
+        # Clean up on error and free memory
         shutil.rmtree(request_dir, ignore_errors=True)
+        gc.collect()
         logger.error(f"Unexpected error: {e}")
         import traceback
         logger.error(f"Traceback: {traceback.format_exc()}")
