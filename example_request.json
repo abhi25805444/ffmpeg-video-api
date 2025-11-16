@@ -1,0 +1,18 @@
+{
+  "original_image_url": "https://example.com/original-photo.jpg",
+  "result_image_urls": [
+    "https://example.com/result-cinematic.jpg",
+    "https://example.com/result-vibrant.jpg",
+    "https://example.com/result-moody.jpg",
+    "https://example.com/result-dramatic.jpg"
+  ],
+  "prompt_preview_text": "A stunning sunset over mountains with dramatic lighting",
+  "style_names": [
+    "Cinematic",
+    "Vibrant Colors",
+    "Moody & Dark",
+    "Dramatic HDR"
+  ],
+  "logo_url": "https://example.com/brand-logo.png",
+  "custom_cta_text": "Link in Bio 👆"
+}

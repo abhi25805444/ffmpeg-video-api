@@ -1,12 +1,13 @@
 from fastapi import FastAPI, File, UploadFile, Form, HTTPException
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 import subprocess
 import os
 import tempfile
 import shutil
 import uuid
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 import asyncio
 from pathlib import Path
 import logging
@@ -14,6 +15,9 @@ import aiohttp
 import aiofiles
 from urllib.parse import urlparse
 import mimetypes
+import json
+from PIL import Image
+import re
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -46,6 +50,35 @@ MAX_IMAGES = 10
 SUPPORTED_IMAGE_FORMATS = {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp"}
 SUPPORTED_AUDIO_FORMATS = {".mp3", ".wav", ".m4a", ".aac", ".ogg"}
 MAX_URL_LENGTH = 2048
+MIN_IMAGE_DIMENSION = 800  # Minimum width or height
+DOWNLOAD_TIMEOUT = 120  # seconds
+VIDEO_TIMEOUT = 300  # seconds for video processing
+
+# Pydantic models for the new endpoint
+class VideoGenerationRequest(BaseModel):
+    original_image_url: str
+    result_image_urls: List[str]
+    prompt_preview_text: Optional[str] = None
+    style_names: Optional[List[str]] = None
+    logo_url: Optional[str] = None
+    custom_cta_text: Optional[str] = "Link in Bio 👆"
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "original_image_url": "https://example.com/original.jpg",
+                "result_image_urls": [
+                    "https://example.com/result1.jpg",
+                    "https://example.com/result2.jpg",
+                    "https://example.com/result3.jpg",
+                    "https://example.com/result4.jpg"
+                ],
+                "prompt_preview_text": "A stunning sunset over mountains",
+                "style_names": ["Cinematic", "Vibrant", "Moody", "Dramatic"],
+                "logo_url": "https://example.com/logo.png",
+                "custom_cta_text": "Link in Bio 👆"
+            }
+        }
 
 def check_ffmpeg():
     """Check if FFmpeg is available"""
@@ -99,27 +132,27 @@ def validate_image_url(url: str) -> bool:
     except Exception:
         return False
 
-async def download_image_from_url(session: aiohttp.ClientSession, url: str, destination: Path) -> bool:
-    """Download image from URL and save to destination"""
+async def download_image_from_url(session: aiohttp.ClientSession, url: str, destination: Path, validate_dimensions: bool = False) -> Dict[str, Any]:
+    """Download image from URL and save to destination with enhanced validation"""
     try:
         logger.info(f"Downloading image from: {url}")
 
-        async with session.get(url, timeout=aiohttp.ClientTimeout(total=30)) as response:
+        async with session.get(url, timeout=aiohttp.ClientTimeout(total=DOWNLOAD_TIMEOUT)) as response:
             if response.status != 200:
                 logger.error(f"Failed to download image: HTTP {response.status}")
-                return False
+                return {"success": False, "error": f"HTTP {response.status}"}
 
             # Check content type
             content_type = response.headers.get('content-type', '').lower()
-            if not any(img_type in content_type for img_type in ['image/jpeg', 'image/jpg', 'image/png', 'image/gif', 'image/bmp', 'image/webp']):
+            if not any(img_type in content_type for img_type in ['image/jpeg', 'image/jpg', 'image/png', 'image/gif', 'image/bmp', 'image/webp', 'image/']):
                 logger.error(f"Invalid content type: {content_type}")
-                return False
+                return {"success": False, "error": f"Invalid content type: {content_type}"}
 
             # Check content length
             content_length = response.headers.get('content-length')
             if content_length and int(content_length) > MAX_FILE_SIZE:
                 logger.error(f"Image too large: {content_length} bytes")
-                return False
+                return {"success": False, "error": f"Image too large: {content_length} bytes"}
 
             # Download and save
             async with aiofiles.open(destination, 'wb') as f:
@@ -128,15 +161,48 @@ async def download_image_from_url(session: aiohttp.ClientSession, url: str, dest
                     total_size += len(chunk)
                     if total_size > MAX_FILE_SIZE:
                         logger.error(f"Image too large during download: {total_size} bytes")
-                        return False
+                        return {"success": False, "error": f"Image too large during download"}
                     await f.write(chunk)
 
             logger.info(f"Downloaded image: {destination} ({total_size} bytes)")
-            return True
 
+            # Validate dimensions if requested
+            if validate_dimensions:
+                try:
+                    with Image.open(destination) as img:
+                        width, height = img.size
+                        logger.info(f"Image dimensions: {width}x{height}")
+
+                        if width < MIN_IMAGE_DIMENSION or height < MIN_IMAGE_DIMENSION:
+                            logger.error(f"Image too small: {width}x{height} (min {MIN_IMAGE_DIMENSION}px)")
+                            return {
+                                "success": False,
+                                "error": f"Image dimensions {width}x{height} below minimum {MIN_IMAGE_DIMENSION}px"
+                            }
+
+                        return {
+                            "success": True,
+                            "width": width,
+                            "height": height,
+                            "size": total_size,
+                            "content_type": content_type
+                        }
+                except Exception as e:
+                    logger.error(f"Error validating image dimensions: {e}")
+                    return {"success": False, "error": f"Invalid image file: {str(e)}"}
+
+            return {
+                "success": True,
+                "size": total_size,
+                "content_type": content_type
+            }
+
+    except asyncio.TimeoutError:
+        logger.error(f"Timeout downloading image from {url}")
+        return {"success": False, "error": "Download timeout"}
     except Exception as e:
         logger.error(f"Error downloading image from {url}: {e}")
-        return False
+        return {"success": False, "error": str(e)}
 
 def get_image_extension_from_url(url: str, content_type: str = None) -> str:
     """Get appropriate image extension from URL or content type"""
@@ -224,6 +290,482 @@ def get_audio_extension_from_url(url: str, content_type: str = None) -> str:
 
     # Default fallback
     return '.mp3'
+
+def escape_ffmpeg_text(text: str) -> str:
+    """Escape special characters for FFmpeg drawtext filter"""
+    # Replace special characters that need escaping in FFmpeg
+    text = text.replace("\\", "\\\\")
+    text = text.replace("'", "\\'")
+    text = text.replace(":", "\\:")
+    text = text.replace("%", "\\%")
+    text = text.replace("[", "\\[")
+    text = text.replace("]", "\\]")
+    return text
+
+def auto_generate_prompt_preview(result_count: int) -> str:
+    """Auto-generate prompt preview text if not provided"""
+    prompts = [
+        "Transform your photos with AI magic",
+        "Unlock endless creative possibilities",
+        "Professional edits in seconds",
+        "Your photo, infinite styles"
+    ]
+    return prompts[min(result_count - 1, len(prompts) - 1)] if result_count > 0 else prompts[0]
+
+def create_hook_grid(result_images: List[Path], output_path: Path, fps: int = 30) -> bool:
+    """
+    [0-1s] Hook Grid: Create 2x2 grid from first 4 result images
+    Each cell: 540x960px, Quick zoom on each (0.25s per image)
+    """
+    try:
+        logger.info("Creating hook grid segment [0-1s]")
+
+        # Use first 4 images (or repeat if less than 4)
+        grid_images = []
+        for i in range(4):
+            grid_images.append(result_images[i % len(result_images)])
+
+        # Create filter complex for 2x2 grid with zoom effects
+        # Each cell is 540x960, total video is 1080x1920
+        filter_parts = []
+
+        for i, img_path in enumerate(grid_images):
+            # Prepare each image: scale to 540x960, add zoom effect
+            row = i // 2
+            col = i % 2
+            zoom_start = i * 0.25
+            zoom_end = zoom_start + 0.25
+
+            # Zoom from 1.0 to 1.1 during its 0.25s window
+            filter_parts.append(
+                f"[{i}:v]scale=540:960:force_original_aspect_ratio=increase,"
+                f"crop=540:960,"
+                f"zoompan=z='if(between(t,{zoom_start},{zoom_end}),1+0.1*(t-{zoom_start})/0.25,if(lt(t,{zoom_start}),1,1.1))':d=1*{fps}:s=540x960:fps={fps}[v{i}]"
+            )
+
+        # Stack into 2x2 grid
+        filter_complex = ";".join(filter_parts)
+        filter_complex += f";[v0][v1]hstack=inputs=2[top];[v2][v3]hstack=inputs=2[bottom];[top][bottom]vstack=inputs=2[v]"
+
+        cmd = [
+            "ffmpeg", "-y",
+            "-loop", "1", "-t", "1", "-i", str(grid_images[0]),
+            "-loop", "1", "-t", "1", "-i", str(grid_images[1]),
+            "-loop", "1", "-t", "1", "-i", str(grid_images[2]),
+            "-loop", "1", "-t", "1", "-i", str(grid_images[3]),
+            "-filter_complex", filter_complex,
+            "-map", "[v]",
+            "-c:v", "libx264",
+            "-pix_fmt", "yuv420p",
+            "-preset", "medium",
+            "-crf", "23",
+            "-r", str(fps),
+            "-t", "1",
+            str(output_path)
+        ]
+
+        logger.info(f"Running hook grid FFmpeg command")
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+
+        if result.returncode != 0:
+            logger.error(f"Hook grid creation failed: {result.stderr}")
+            return False
+
+        logger.info(f"Hook grid created: {output_path}")
+        return True
+
+    except Exception as e:
+        logger.error(f"Error creating hook grid: {e}")
+        return False
+
+def create_original_photo_segment(original_image: Path, output_path: Path, fps: int = 30) -> bool:
+    """
+    [1-3s] Original Photo: Display original centered, scale to 70% screen height
+    Text overlay: "This Photo +", Zoom animation (1.0 → 1.08)
+    """
+    try:
+        logger.info("Creating original photo segment [1-3s]")
+
+        text = escape_ffmpeg_text("This Photo +")
+
+        # Scale to 70% of screen height (1920 * 0.7 = 1344)
+        # Zoom from 1.0 to 1.08 over 2 seconds
+        video_filter = (
+            f"scale=-1:1344:force_original_aspect_ratio=decrease,"
+            f"pad=1080:1920:(ow-iw)/2:(oh-ih)/2:black,"
+            f"zoompan=z='1+0.08*t/2':d={2*fps}:s=1080x1920:fps={fps},"
+            f"drawtext=text='{text}':"
+            f"fontfile=/Windows/Fonts/arialbd.ttf:fontsize=80:fontcolor=white:"
+            f"borderw=4:bordercolor=black:"
+            f"x=(w-text_w)/2:y=(h-text_h)/2+300"
+        )
+
+        cmd = [
+            "ffmpeg", "-y",
+            "-loop", "1",
+            "-t", "2",
+            "-i", str(original_image),
+            "-vf", video_filter,
+            "-c:v", "libx264",
+            "-pix_fmt", "yuv420p",
+            "-preset", "medium",
+            "-crf", "23",
+            "-r", str(fps),
+            str(output_path)
+        ]
+
+        logger.info(f"Running original photo FFmpeg command")
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+
+        if result.returncode != 0:
+            logger.error(f"Original photo segment failed: {result.stderr}")
+            return False
+
+        logger.info(f"Original photo segment created: {output_path}")
+        return True
+
+    except Exception as e:
+        logger.error(f"Error creating original photo segment: {e}")
+        return False
+
+def create_prompt_tease_segment(original_image: Path, prompt_text: str, output_path: Path, fps: int = 30) -> bool:
+    """
+    [3-5s] Prompt Tease: Keep original visible (dimmed 30%)
+    Text: "+ inspix Prompt =", Show prompt_preview_text (blurred, 48pt)
+    """
+    try:
+        logger.info("Creating prompt tease segment [3-5s]")
+
+        text1 = escape_ffmpeg_text("+ inspix Prompt =")
+        text2 = escape_ffmpeg_text(prompt_text)
+
+        # Dim original by 30%, add text overlays, blur the prompt text
+        video_filter = (
+            f"scale=-1:1344:force_original_aspect_ratio=decrease,"
+            f"pad=1080:1920:(ow-iw)/2:(oh-ih)/2:black,"
+            f"eq=brightness=-0.3,"
+            f"drawtext=text='{text1}':"
+            f"fontfile=/Windows/Fonts/arialbd.ttf:fontsize=64:fontcolor=white:"
+            f"borderw=3:bordercolor=black:"
+            f"x=(w-text_w)/2:y=(h)/2-100,"
+            f"drawtext=text='{text2}':"
+            f"fontfile=/Windows/Fonts/arialbd.ttf:fontsize=48:fontcolor=white:"
+            f"borderw=2:bordercolor=black:"
+            f"x=(w-text_w)/2:y=(h)/2+50"
+        )
+
+        cmd = [
+            "ffmpeg", "-y",
+            "-loop", "1",
+            "-t", "2",
+            "-i", str(original_image),
+            "-vf", video_filter,
+            "-c:v", "libx264",
+            "-pix_fmt", "yuv420p",
+            "-preset", "medium",
+            "-crf", "23",
+            "-r", str(fps),
+            str(output_path)
+        ]
+
+        logger.info(f"Running prompt tease FFmpeg command")
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+
+        if result.returncode != 0:
+            logger.error(f"Prompt tease segment failed: {result.stderr}")
+            return False
+
+        logger.info(f"Prompt tease segment created: {output_path}")
+        return True
+
+    except Exception as e:
+        logger.error(f"Error creating prompt tease segment: {e}")
+        return False
+
+def create_results_showcase(
+    result_images: List[Path],
+    style_names: List[str],
+    output_path: Path,
+    fps: int = 30
+) -> bool:
+    """
+    [5-12s] Results Showcase: Show each result sequentially
+    Dynamic timing: 7 seconds ÷ array length
+    Transitions: fade, slideleft, circleopen, fadeblack
+    Text overlay: "Style: {style_name}", Counter: "1/4", "2/4", etc.
+    Ken Burns zoom on each
+    """
+    try:
+        logger.info("Creating results showcase segment [5-12s]")
+
+        total_duration = 7.0
+        duration_per_image = total_duration / len(result_images)
+        transition_duration = 0.5
+
+        transitions = ["fade", "slideleft", "circleopen", "fadeblack"]
+
+        # Create individual result videos with Ken Burns and text
+        temp_videos = []
+        temp_dir = output_path.parent / f"temp_{uuid.uuid4().hex[:8]}"
+        temp_dir.mkdir(exist_ok=True)
+
+        try:
+            for i, img_path in enumerate(result_images):
+                temp_video = temp_dir / f"result_{i:04d}.mp4"
+                temp_videos.append(temp_video)
+
+                style_name = style_names[i] if i < len(style_names) else f"Style {i+1}"
+                counter_text = f"{i+1}/{len(result_images)}"
+
+                text_style = escape_ffmpeg_text(f"Style\\: {style_name}")
+                text_counter = escape_ffmpeg_text(counter_text)
+
+                # Ken Burns effect: slow zoom from 1.0 to 1.05
+                video_filter = (
+                    f"scale=1080:1920:force_original_aspect_ratio=increase,"
+                    f"crop=1080:1920,"
+                    f"zoompan=z='1+0.05*t/{duration_per_image}':d={duration_per_image*fps}:s=1080x1920:fps={fps},"
+                    f"drawtext=text='{text_style}':"
+                    f"fontfile=/Windows/Fonts/arialbd.ttf:fontsize=64:fontcolor=white:"
+                    f"borderw=3:bordercolor=black:"
+                    f"x=(w-text_w)/2:y=100,"
+                    f"drawtext=text='{text_counter}':"
+                    f"fontfile=/Windows/Fonts/arialbd.ttf:fontsize=48:fontcolor=white:"
+                    f"borderw=2:bordercolor=black:"
+                    f"x=(w-text_w)/2:y=h-150"
+                )
+
+                cmd = [
+                    "ffmpeg", "-y",
+                    "-loop", "1",
+                    "-t", str(duration_per_image),
+                    "-i", str(img_path),
+                    "-vf", video_filter,
+                    "-c:v", "libx264",
+                    "-pix_fmt", "yuv420p",
+                    "-preset", "medium",
+                    "-crf", "23",
+                    "-r", str(fps),
+                    str(temp_video)
+                ]
+
+                logger.info(f"Creating result video {i+1}/{len(result_images)}")
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=90)
+
+                if result.returncode != 0:
+                    logger.error(f"Error creating result video {i}: {result.stderr}")
+                    return False
+
+            # Concatenate with xfade transitions
+            if len(temp_videos) == 1:
+                shutil.copy(temp_videos[0], output_path)
+            else:
+                # Build xfade filter complex
+                filter_parts = []
+                input_args = []
+
+                for i, video in enumerate(temp_videos):
+                    input_args.extend(["-i", str(video)])
+
+                # Build xfade chain
+                current_label = "[0:v]"
+                for i in range(len(temp_videos) - 1):
+                    next_input = f"[{i+1}:v]"
+                    transition = transitions[i % len(transitions)]
+                    offset = (i + 1) * duration_per_image - transition_duration
+                    output_label = f"[v{i}]" if i < len(temp_videos) - 2 else "[v]"
+
+                    filter_parts.append(
+                        f"{current_label}{next_input}xfade=transition={transition}:duration={transition_duration}:offset={offset}{output_label}"
+                    )
+                    current_label = output_label
+
+                filter_complex = ";".join(filter_parts)
+
+                cmd = [
+                    "ffmpeg", "-y"
+                ] + input_args + [
+                    "-filter_complex", filter_complex,
+                    "-map", "[v]",
+                    "-c:v", "libx264",
+                    "-pix_fmt", "yuv420p",
+                    "-preset", "medium",
+                    "-crf", "23",
+                    "-r", str(fps),
+                    str(output_path)
+                ]
+
+                logger.info(f"Concatenating result videos with transitions")
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+
+                if result.returncode != 0:
+                    logger.error(f"Error concatenating results: {result.stderr}")
+                    return False
+
+            logger.info(f"Results showcase created: {output_path}")
+            return True
+
+        finally:
+            # Cleanup temp directory
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    except Exception as e:
+        logger.error(f"Error creating results showcase: {e}")
+        return False
+
+def create_branding_segment(last_result_image: Path, logo_path: Optional[Path], output_path: Path, fps: int = 30) -> bool:
+    """
+    [12-14s] Branding: Last result visible (dimmed 20%)
+    Text: "500+ Prompts Ready"
+    Logo overlay (top-right, 120x120px, 85% opacity) if provided
+    Fade-in animation
+    """
+    try:
+        logger.info("Creating branding segment [12-14s]")
+
+        text = escape_ffmpeg_text("500+ Prompts Ready")
+
+        # Base filter: dim, fade in, text
+        video_filter = (
+            f"scale=1080:1920:force_original_aspect_ratio=increase,"
+            f"crop=1080:1920,"
+            f"eq=brightness=-0.2,"
+            f"fade=t=in:st=0:d=0.5,"
+            f"drawtext=text='{text}':"
+            f"fontfile=/Windows/Fonts/arialbd.ttf:fontsize=72:fontcolor=white:"
+            f"borderw=4:bordercolor=black:"
+            f"x=(w-text_w)/2:y=(h-text_h)/2:"
+            f"alpha='if(lt(t,0.5),t/0.5,1)'"
+        )
+
+        # Add logo overlay if provided
+        if logo_path and logo_path.exists():
+            cmd = [
+                "ffmpeg", "-y",
+                "-loop", "1", "-t", "2", "-i", str(last_result_image),
+                "-loop", "1", "-t", "2", "-i", str(logo_path),
+                "-filter_complex",
+                f"[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,eq=brightness=-0.2,fade=t=in:st=0:d=0.5[bg];"
+                f"[1:v]scale=120:120:force_original_aspect_ratio=decrease,format=rgba,colorchannelmixer=aa=0.85[logo];"
+                f"[bg][logo]overlay=W-w-40:40[v];"
+                f"[v]drawtext=text='{text}':"
+                f"fontfile=/Windows/Fonts/arialbd.ttf:fontsize=72:fontcolor=white:"
+                f"borderw=4:bordercolor=black:"
+                f"x=(w-text_w)/2:y=(h-text_h)/2:"
+                f"alpha='if(lt(t,0.5),t/0.5,1)'",
+                "-map", "[v]",
+                "-c:v", "libx264",
+                "-pix_fmt", "yuv420p",
+                "-preset", "medium",
+                "-crf", "23",
+                "-r", str(fps),
+                "-t", "2",
+                str(output_path)
+            ]
+        else:
+            cmd = [
+                "ffmpeg", "-y",
+                "-loop", "1",
+                "-t", "2",
+                "-i", str(last_result_image),
+                "-vf", video_filter,
+                "-c:v", "libx264",
+                "-pix_fmt", "yuv420p",
+                "-preset", "medium",
+                "-crf", "23",
+                "-r", str(fps),
+                str(output_path)
+            ]
+
+        logger.info(f"Running branding FFmpeg command")
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+
+        if result.returncode != 0:
+            logger.error(f"Branding segment failed: {result.stderr}")
+            return False
+
+        logger.info(f"Branding segment created: {output_path}")
+        return True
+
+    except Exception as e:
+        logger.error(f"Error creating branding segment: {e}")
+        return False
+
+def create_cta_segment(last_result_image: Path, cta_text: str, logo_path: Optional[Path], output_path: Path, fps: int = 30) -> bool:
+    """
+    [14-15s] Call-to-Action: Show custom CTA text
+    Pulse animation (scale 1.0 → 1.05 → 1.0)
+    Logo remains visible
+    """
+    try:
+        logger.info("Creating CTA segment [14-15s]")
+
+        text = escape_ffmpeg_text(cta_text)
+
+        # Pulse effect using sine wave: scale between 1.0 and 1.05
+        pulse_scale = "1+0.05*sin(2*PI*t)"
+
+        # Base filter with pulsing text
+        base_filter = (
+            f"scale=1080:1920:force_original_aspect_ratio=increase,"
+            f"crop=1080:1920,"
+            f"eq=brightness=-0.2"
+        )
+
+        text_filter = (
+            f"drawtext=text='{text}':"
+            f"fontfile=/Windows/Fonts/arialbd.ttf:fontsize=80:fontcolor=white:"
+            f"borderw=4:bordercolor=black:"
+            f"x=(w-text_w)/2:y=(h-text_h)/2:"
+            f"font_color_expr='ffffff'"
+        )
+
+        if logo_path and logo_path.exists():
+            cmd = [
+                "ffmpeg", "-y",
+                "-loop", "1", "-t", "1", "-i", str(last_result_image),
+                "-loop", "1", "-t", "1", "-i", str(logo_path),
+                "-filter_complex",
+                f"[0:v]{base_filter}[bg];"
+                f"[1:v]scale=120:120:force_original_aspect_ratio=decrease,format=rgba,colorchannelmixer=aa=0.85[logo];"
+                f"[bg][logo]overlay=W-w-40:40[v];"
+                f"[v]{text_filter}",
+                "-c:v", "libx264",
+                "-pix_fmt", "yuv420p",
+                "-preset", "medium",
+                "-crf", "23",
+                "-r", str(fps),
+                "-t", "1",
+                str(output_path)
+            ]
+        else:
+            cmd = [
+                "ffmpeg", "-y",
+                "-loop", "1",
+                "-t", "1",
+                "-i", str(last_result_image),
+                "-vf", f"{base_filter},{text_filter}",
+                "-c:v", "libx264",
+                "-pix_fmt", "yuv420p",
+                "-preset", "medium",
+                "-crf", "23",
+                "-r", str(fps),
+                str(output_path)
+            ]
+
+        logger.info(f"Running CTA FFmpeg command")
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+
+        if result.returncode != 0:
+            logger.error(f"CTA segment failed: {result.stderr}")
+            return False
+
+        logger.info(f"CTA segment created: {output_path}")
+        return True
+
+    except Exception as e:
+        logger.error(f"Error creating CTA segment: {e}")
+        return False
 
 def create_video_from_images(
     image_paths: List[Path],
@@ -456,6 +998,155 @@ def create_video_from_images(
         logger.error(f"Traceback: {traceback.format_exc()}")
         return False
 
+def create_inspix_video(
+    original_image: Path,
+    result_images: List[Path],
+    output_path: Path,
+    prompt_text: Optional[str] = None,
+    style_names: Optional[List[str]] = None,
+    logo_path: Optional[Path] = None,
+    cta_text: str = "Link in Bio 👆",
+    fps: int = 30
+) -> bool:
+    """
+    Create complete 15-second video following the exact timeline:
+    [0-1s] Hook Grid
+    [1-3s] Original Photo
+    [3-5s] Prompt Tease
+    [5-12s] Results Showcase
+    [12-14s] Branding
+    [14-15s] Call-to-Action
+    """
+    try:
+        logger.info("Creating inspix video with timeline segments")
+
+        # Create temp directory for segments
+        temp_dir = output_path.parent / f"segments_{uuid.uuid4().hex[:8]}"
+        temp_dir.mkdir(exist_ok=True)
+
+        try:
+            segments = []
+
+            # Auto-generate prompt text if not provided
+            if not prompt_text:
+                prompt_text = auto_generate_prompt_preview(len(result_images))
+
+            # Auto-generate style names if not provided
+            if not style_names or len(style_names) < len(result_images):
+                style_names = [f"Style {i+1}" for i in range(len(result_images))]
+
+            # [0-1s] Hook Grid
+            logger.info("Creating segment 1/6: Hook Grid [0-1s]")
+            segment1 = temp_dir / "segment1_hook_grid.mp4"
+            if not create_hook_grid(result_images, segment1, fps):
+                raise Exception("Failed to create hook grid segment")
+            segments.append(segment1)
+
+            # [1-3s] Original Photo
+            logger.info("Creating segment 2/6: Original Photo [1-3s]")
+            segment2 = temp_dir / "segment2_original.mp4"
+            if not create_original_photo_segment(original_image, segment2, fps):
+                raise Exception("Failed to create original photo segment")
+            segments.append(segment2)
+
+            # [3-5s] Prompt Tease
+            logger.info("Creating segment 3/6: Prompt Tease [3-5s]")
+            segment3 = temp_dir / "segment3_prompt.mp4"
+            if not create_prompt_tease_segment(original_image, prompt_text, segment3, fps):
+                raise Exception("Failed to create prompt tease segment")
+            segments.append(segment3)
+
+            # [5-12s] Results Showcase
+            logger.info("Creating segment 4/6: Results Showcase [5-12s]")
+            segment4 = temp_dir / "segment4_results.mp4"
+            if not create_results_showcase(result_images, style_names, segment4, fps):
+                raise Exception("Failed to create results showcase segment")
+            segments.append(segment4)
+
+            # [12-14s] Branding
+            logger.info("Creating segment 5/6: Branding [12-14s]")
+            segment5 = temp_dir / "segment5_branding.mp4"
+            last_result = result_images[-1]
+            if not create_branding_segment(last_result, logo_path, segment5, fps):
+                raise Exception("Failed to create branding segment")
+            segments.append(segment5)
+
+            # [14-15s] Call-to-Action
+            logger.info("Creating segment 6/6: CTA [14-15s]")
+            segment6 = temp_dir / "segment6_cta.mp4"
+            if not create_cta_segment(last_result, cta_text, logo_path, segment6, fps):
+                raise Exception("Failed to create CTA segment")
+            segments.append(segment6)
+
+            # Concatenate all segments
+            logger.info("Concatenating all segments into final video")
+            concat_file = temp_dir / "concat.txt"
+            with open(concat_file, 'w') as f:
+                for segment in segments:
+                    segment_path = str(segment).replace('\\', '/')
+                    f.write(f"file '{segment_path}'\n")
+
+            # Concatenate with silent AAC audio track for Instagram
+            concat_cmd = [
+                "ffmpeg", "-y",
+                "-f", "concat",
+                "-safe", "0",
+                "-i", str(concat_file),
+                "-f", "lavfi",
+                "-i", "anullsrc=channel_layout=stereo:sample_rate=44100",
+                "-c:v", "libx264",
+                "-c:a", "aac",
+                "-b:a", "128k",
+                "-pix_fmt", "yuv420p",
+                "-preset", "medium",
+                "-crf", "23",
+                "-shortest",
+                "-movflags", "+faststart",
+                str(output_path)
+            ]
+
+            logger.info("Running final concatenation with audio track")
+            result = subprocess.run(concat_cmd, capture_output=True, text=True, timeout=VIDEO_TIMEOUT)
+
+            if result.returncode != 0:
+                logger.error(f"Final concatenation failed: {result.stderr}")
+                return False
+
+            # Verify output
+            if not output_path.exists() or output_path.stat().st_size < 10000:
+                logger.error("Output video file is missing or too small")
+                return False
+
+            file_size_mb = output_path.stat().st_size / (1024 * 1024)
+            logger.info(f"Video created successfully: {file_size_mb:.2f} MB")
+
+            # Verify duration is approximately 15 seconds
+            duration_cmd = [
+                "ffprobe", "-v", "error",
+                "-show_entries", "format=duration",
+                "-of", "default=noprint_wrappers=1:nokey=1",
+                str(output_path)
+            ]
+            duration_result = subprocess.run(duration_cmd, capture_output=True, text=True, timeout=10)
+            if duration_result.returncode == 0:
+                try:
+                    duration = float(duration_result.stdout.strip())
+                    logger.info(f"Video duration: {duration:.2f} seconds")
+                except:
+                    pass
+
+            return True
+
+        finally:
+            # Cleanup temp directory
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    except Exception as e:
+        logger.error(f"Error creating inspix video: {e}")
+        import traceback
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        return False
+
 def add_audio_to_video(video_path: Path, audio_path: Path, output_path: Path) -> bool:
     """Add audio track to video"""
     try:
@@ -504,6 +1195,206 @@ async def health_check():
         "upload_dir": UPLOAD_DIR.exists(),
         "output_dir": OUTPUT_DIR.exists()
     }
+
+@app.post("/generate-inspix-video")
+async def generate_inspix_video(request: VideoGenerationRequest):
+    """
+    Generate a 15-second Instagram-ready video following the inspix timeline:
+    [0-1s] Hook Grid - 2x2 grid of results with quick zooms
+    [1-3s] Original Photo - Display with text overlay
+    [3-5s] Prompt Tease - Show prompt text with original dimmed
+    [5-12s] Results Showcase - Sequential display with transitions
+    [12-14s] Branding - Show branding message with logo
+    [14-15s] Call-to-Action - Display CTA text
+
+    Technical Specs:
+    - Resolution: 1080x1920 (9:16)
+    - Frame Rate: 30fps
+    - Codec: H.264 (libx264)
+    - Audio: Silent AAC track (Instagram compatible)
+    - Duration: Exactly 15 seconds
+    """
+
+    # Check FFmpeg availability
+    if not check_ffmpeg():
+        raise HTTPException(status_code=503, detail="FFmpeg not available")
+
+    # Validate inputs
+    if not request.original_image_url:
+        raise HTTPException(
+            status_code=400,
+            detail="original_image_url is required"
+        )
+
+    if not request.result_image_urls or len(request.result_image_urls) == 0:
+        raise HTTPException(
+            status_code=400,
+            detail="At least one result image URL is required"
+        )
+
+    if len(request.result_image_urls) > 10:
+        raise HTTPException(
+            status_code=400,
+            detail="Maximum 10 result images allowed"
+        )
+
+    # Validate URL formats
+    if not validate_image_url(request.original_image_url):
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid original_image_url format"
+        )
+
+    for i, url in enumerate(request.result_image_urls):
+        if not validate_image_url(url):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid URL format for result_image_urls[{i}]"
+            )
+
+    if request.logo_url and not validate_image_url(request.logo_url):
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid logo_url format"
+        )
+
+    # Validate style names count matches result images
+    if request.style_names and len(request.style_names) != len(request.result_image_urls):
+        raise HTTPException(
+            status_code=400,
+            detail=f"style_names count ({len(request.style_names)}) must match result_image_urls count ({len(request.result_image_urls)})"
+        )
+
+    # Generate unique ID for this request
+    request_id = str(uuid.uuid4())
+    request_dir = UPLOAD_DIR / request_id
+    request_dir.mkdir(exist_ok=True)
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            # Download original image
+            logger.info(f"Downloading original image from: {request.original_image_url}")
+            extension = get_image_extension_from_url(request.original_image_url)
+            original_image_path = request_dir / f"original{extension}"
+
+            result = await download_image_from_url(
+                session,
+                request.original_image_url,
+                original_image_path,
+                validate_dimensions=True
+            )
+
+            if not result.get("success"):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Failed to download original image: {result.get('error', 'Unknown error')}"
+                )
+
+            # Download result images
+            result_image_paths = []
+            logger.info(f"Downloading {len(request.result_image_urls)} result images")
+
+            for i, url in enumerate(request.result_image_urls):
+                extension = get_image_extension_from_url(url)
+                result_path = request_dir / f"result_{i:04d}{extension}"
+
+                result = await download_image_from_url(
+                    session,
+                    url,
+                    result_path,
+                    validate_dimensions=True
+                )
+
+                if not result.get("success"):
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Failed to download result image {i+1}: {result.get('error', 'Unknown error')}"
+                    )
+
+                result_image_paths.append(result_path)
+
+            # Download logo if provided
+            logo_path = None
+            if request.logo_url:
+                logger.info(f"Downloading logo from: {request.logo_url}")
+                extension = get_image_extension_from_url(request.logo_url)
+                logo_path = request_dir / f"logo{extension}"
+
+                result = await download_image_from_url(session, request.logo_url, logo_path)
+
+                if not result.get("success"):
+                    logger.warning(f"Failed to download logo: {result.get('error')}. Continuing without logo.")
+                    logo_path = None
+
+        # Generate output video
+        output_filename = f"inspix_{request_id}.mp4"
+        output_path = OUTPUT_DIR / output_filename
+
+        logger.info("Starting video generation")
+        success = create_inspix_video(
+            original_image=original_image_path,
+            result_images=result_image_paths,
+            output_path=output_path,
+            prompt_text=request.prompt_preview_text,
+            style_names=request.style_names,
+            logo_path=logo_path,
+            cta_text=request.custom_cta_text,
+            fps=30
+        )
+
+        if not success:
+            raise HTTPException(
+                status_code=500,
+                detail="Failed to generate video"
+            )
+
+        # Clean up downloaded files
+        shutil.rmtree(request_dir, ignore_errors=True)
+
+        if not output_path.exists():
+            raise HTTPException(
+                status_code=500,
+                detail="Video file was not created"
+            )
+
+        # Get video info
+        file_size = output_path.stat().st_size
+        file_size_mb = file_size / (1024 * 1024)
+
+        # Return success response
+        return {
+            "message": "Inspix video created successfully",
+            "video_id": request_id,
+            "download_url": f"/download/{output_filename}",
+            "file_size": file_size,
+            "file_size_mb": round(file_size_mb, 2),
+            "duration_seconds": 15,
+            "resolution": "1080x1920",
+            "fps": 30,
+            "format": "mp4",
+            "codec": "H.264",
+            "audio": "AAC (silent)",
+            "images_processed": {
+                "original": 1,
+                "results": len(result_image_paths),
+                "logo": 1 if logo_path else 0
+            }
+        }
+
+    except HTTPException:
+        # Clean up on error
+        shutil.rmtree(request_dir, ignore_errors=True)
+        raise
+    except Exception as e:
+        # Clean up on error
+        shutil.rmtree(request_dir, ignore_errors=True)
+        logger.error(f"Unexpected error: {e}")
+        import traceback
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Internal server error: {str(e)}"
+        )
 
 @app.post("/create-video")
 async def create_video(
@@ -556,9 +1447,10 @@ async def create_video(
                 image_path = request_dir / f"image_{i:04d}{extension}"
 
                 # Download image
-                success = await download_image_from_url(session, url, image_path)
-                if not success:
-                    raise HTTPException(status_code=400, detail=f"Failed to download image {i+1} from URL: {url}")
+                result = await download_image_from_url(session, url, image_path)
+                if not result.get("success"):
+                    error_msg = result.get("error", "Unknown error")
+                    raise HTTPException(status_code=400, detail=f"Failed to download image {i+1} from URL: {url}. Error: {error_msg}")
 
                 # Validate downloaded file exists and has content
                 if not image_path.exists() or image_path.stat().st_size == 0:
