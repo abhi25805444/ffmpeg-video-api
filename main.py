@@ -423,10 +423,10 @@ def create_original_photo_segment(original_image: Path, output_path: Path, fps: 
 
         text = escape_ffmpeg_text("This Photo +")
 
-        # Scale to 70% of screen height (1920 * 0.7 = 1344)
+        # Scale to fit within 1080x1344 (70% of screen height), then pad to 1080x1920
         # Zoom from 1.0 to 1.08 over 2 seconds
         video_filter = (
-            f"scale=-1:1344:force_original_aspect_ratio=decrease,"
+            f"scale=1080:1344:force_original_aspect_ratio=decrease,"
             f"pad=1080:1920:(ow-iw)/2:(oh-ih)/2:black,"
             f"zoompan=z='1+0.08*t/2':d={2*fps}:s=1080x1920:fps={fps},"
             f"drawtext=text='{text}':"
@@ -477,7 +477,7 @@ def create_prompt_tease_segment(original_image: Path, prompt_text: str, output_p
 
         # Dim original by 30%, add text overlays, blur the prompt text
         video_filter = (
-            f"scale=-1:1344:force_original_aspect_ratio=decrease,"
+            f"scale=1080:1344:force_original_aspect_ratio=decrease,"
             f"pad=1080:1920:(ow-iw)/2:(oh-ih)/2:black,"
             f"eq=brightness=-0.3,"
             f"drawtext=text='{text1}':"
