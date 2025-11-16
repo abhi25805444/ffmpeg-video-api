@@ -327,20 +327,16 @@ def create_hook_grid(result_images: List[Path], output_path: Path, fps: int = 30
 
         # Create filter complex for 2x2 grid with zoom effects
         # Each cell is 540x960, total video is 1080x1920
+        # Simplified approach: apply continuous zoom throughout 1 second
         filter_parts = []
 
         for i, img_path in enumerate(grid_images):
-            # Prepare each image: scale to 540x960, add zoom effect
-            row = i // 2
-            col = i % 2
-            zoom_start = i * 0.25
-            zoom_end = zoom_start + 0.25
-
-            # Zoom from 1.0 to 1.1 during its 0.25s window
+            # Prepare each image: scale to 540x960, add simple zoom effect
+            # Zoom from 1.0 to 1.1 over the full 1 second duration
             filter_parts.append(
                 f"[{i}:v]scale=540:960:force_original_aspect_ratio=increase,"
                 f"crop=540:960,"
-                f"zoompan=z='if(between(t,{zoom_start},{zoom_end}),1+0.1*(t-{zoom_start})/0.25,if(lt(t,{zoom_start}),1,1.1))':d=1*{fps}:s=540x960:fps={fps}[v{i}]"
+                f"zoompan=z='1+0.1*t':d={fps}:s=540x960:fps={fps}[v{i}]"
             )
 
         # Stack into 2x2 grid
