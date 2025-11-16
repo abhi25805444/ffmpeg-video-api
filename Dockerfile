@@ -1,38 +1,35 @@
 FROM python:3.11-slim
 
-# Install FFmpeg and system dependencies
-RUN apt-get update && apt-get install -y \
-    ffmpeg \
-    curl \
-    && rm -rf /var/lib/apt/lists/* \
-    && apt-get clean
-
 # Set working directory
 WORKDIR /app
 
-# Copy requirements and install dependencies
+# Install system dependencies including FFmpeg
+RUN apt-get update && apt-get install -y \
+    ffmpeg \
+    fonts-dejavu-core \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy requirements first for better caching
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy application code
+# Install Python dependencies
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir -r requirements.txt
+
+# Copy application files
 COPY main.py .
+COPY test_inspix_api.py .
+COPY example_request.json .
 
-# Create directories
+# Create necessary directories
 RUN mkdir -p uploads outputs
 
 # Expose port
 EXPOSE 8000
 
-# Set environment variables
-ENV PORT=8000
-ENV PYTHONUNBUFFERED=1
-
-# Verify FFmpeg installation
-RUN ffmpeg -version
-
 # Health check
-HEALTHCHECK --interval=30s --timeout=30s --start-period=5s --retries=3 \
-  CMD curl -f http://localhost:8000/health || exit 1
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD python -c "import requests; requests.get('http://localhost:8000/health')" || exit 1
 
-# Start the application
-CMD ["python", "main.py"]
+# Run the application
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]

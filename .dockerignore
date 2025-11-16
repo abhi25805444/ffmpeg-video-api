@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Project specific
+uploads/*
+outputs/*
+*.mp4
+*.mp3
+
+# Git
+.git/
+.gitignore
+
+# Documentation (already in image)
+*.md
+!README.md
+
+# Tests (included separately)
+# test_*.py
