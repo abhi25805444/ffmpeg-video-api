@@ -1,0 +1,31 @@
+services:
+  - type: web
+    name: ffmpeg-video-api
+    env: docker
+    region: oregon
+    plan: starter  # Minimum for FFmpeg processing
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+
+    # Environment variables
+    envVars:
+      - key: PORT
+        value: 10000
+      - key: MAX_FILE_SIZE
+        value: 10485760
+      - key: DOWNLOAD_TIMEOUT
+        value: 120
+      - key: VIDEO_TIMEOUT
+        value: 300
+
+    # Health check
+    healthCheckPath: /health
+
+    # Auto-deploy from main branch
+    autoDeploy: true
+
+    # Disk storage for temporary files and outputs
+    disk:
+      name: video-storage
+      mountPath: /app/outputs
+      sizeGB: 5
