@@ -66,6 +66,7 @@ class VideoGenerationRequest(BaseModel):
     style_names: Optional[List[str]] = None
     logo_url: Optional[str] = None
     custom_cta_text: Optional[str] = "Link in Bio 👆"
+    music_url: Optional[str] = None
 
     class Config:
         json_schema_extra = {
@@ -80,7 +81,8 @@ class VideoGenerationRequest(BaseModel):
                 "prompt_preview_text": "A stunning sunset over mountains",
                 "style_names": ["Cinematic", "Vibrant", "Moody", "Dramatic"],
                 "logo_url": "https://example.com/logo.png",
-                "custom_cta_text": "Link in Bio 👆"
+                "custom_cta_text": "Link in Bio 👆",
+                "music_url": "https://example.com/background-music.mp3"
             }
         }
 
@@ -1104,7 +1106,8 @@ def create_inspix_video(
     style_names: Optional[List[str]] = None,
     logo_path: Optional[Path] = None,
     cta_text: str = "Link in Bio 👆",
-    fps: int = 30
+    fps: int = 30,
+    music_path: Optional[Path] = None
 ) -> bool:
     """
     Create complete 15-second video following the exact timeline:
@@ -1114,6 +1117,8 @@ def create_inspix_video(
     [5-12s] Results Showcase
     [12-14s] Branding
     [14-15s] Call-to-Action
+
+    Optional background music will be added if music_path is provided.
     """
     try:
         logger.info("Creating inspix video with timeline segments")
@@ -1191,28 +1196,55 @@ def create_inspix_video(
                     segment_path = str(segment.resolve()).replace('\\', '/')
                     f.write(f"file '{segment_path}'\n")
 
-            # Concatenate with silent AAC audio track for Instagram
+            # Concatenate with audio track (either background music or silent)
             memory_flags = get_memory_optimized_ffmpeg_flags()
 
-            concat_cmd = [
-                "ffmpeg", "-y",
-                "-f", "concat",
-                "-safe", "0",
-                "-i", str(concat_file),
-                "-f", "lavfi",
-                "-i", "anullsrc=channel_layout=stereo:sample_rate=44100",
-                "-c:v", "libx264",
-                "-c:a", "aac",
-                "-b:a", "64k",  # Reduced from 96k
-                "-pix_fmt", "yuv420p",
-                "-preset", "ultrafast",
-                "-crf", "30",
-                "-shortest",
-                "-movflags", "+faststart",
-                "-threads", "1",
-            ] + memory_flags + [
-                str(output_path)
-            ]
+            if music_path and music_path.exists():
+                # Use provided background music, loop it to match video duration
+                logger.info(f"Adding background music: {music_path}")
+                concat_cmd = [
+                    "ffmpeg", "-y",
+                    "-f", "concat",
+                    "-safe", "0",
+                    "-i", str(concat_file),
+                    "-stream_loop", "-1",  # Loop audio indefinitely
+                    "-i", str(music_path),
+                    "-c:v", "libx264",
+                    "-c:a", "aac",
+                    "-b:a", "128k",  # Higher quality for background music
+                    "-pix_fmt", "yuv420p",
+                    "-preset", "ultrafast",
+                    "-crf", "30",
+                    "-shortest",  # End when video ends
+                    "-map", "0:v:0",  # Video from first input
+                    "-map", "1:a:0",  # Audio from second input
+                    "-movflags", "+faststart",
+                    "-threads", "1",
+                ] + memory_flags + [
+                    str(output_path)
+                ]
+            else:
+                # Use silent AAC audio track for Instagram compatibility
+                logger.info("Adding silent audio track")
+                concat_cmd = [
+                    "ffmpeg", "-y",
+                    "-f", "concat",
+                    "-safe", "0",
+                    "-i", str(concat_file),
+                    "-f", "lavfi",
+                    "-i", "anullsrc=channel_layout=stereo:sample_rate=44100",
+                    "-c:v", "libx264",
+                    "-c:a", "aac",
+                    "-b:a", "64k",  # Reduced from 96k
+                    "-pix_fmt", "yuv420p",
+                    "-preset", "ultrafast",
+                    "-crf", "30",
+                    "-shortest",
+                    "-movflags", "+faststart",
+                    "-threads", "1",
+                ] + memory_flags + [
+                    str(output_path)
+                ]
 
             logger.info("Running final concatenation with audio track")
             result = subprocess.run(concat_cmd, capture_output=True, text=True, timeout=VIDEO_TIMEOUT)
@@ -1327,12 +1359,13 @@ async def generate_inspix_video(request: VideoGenerationRequest):
     - Resolution: 720x1280 (9:16) - Reduced for memory
     - Frame Rate: 24fps (reduced for memory efficiency)
     - Codec: H.264 (libx264, ultrafast preset, CRF 30)
-    - Audio: Silent AAC track 64k (Instagram compatible)
+    - Audio: Background music (128k AAC) if music_url provided, otherwise silent AAC track 64k
     - Duration: Exactly 15 seconds
     - Max Images: 4 result images (memory constraint)
-    - Max File Size: 3MB per image
+    - Max File Size: 3MB per image/audio
     - Threads: 1 (prevents memory spikes)
     - Memory flags: bufsize 256k, maxrate 1M
+    - Background Music: Optional music_url parameter for custom background music (will be looped to match video duration)
     """
 
     # Check FFmpeg availability
@@ -1376,6 +1409,12 @@ async def generate_inspix_video(request: VideoGenerationRequest):
         raise HTTPException(
             status_code=400,
             detail="Invalid logo_url format"
+        )
+
+    if request.music_url and not validate_audio_url(request.music_url):
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid music_url format"
         )
 
     # Validate style names count matches result images
@@ -1449,6 +1488,19 @@ async def generate_inspix_video(request: VideoGenerationRequest):
                     logger.warning(f"Failed to download logo: {result.get('error')}. Continuing without logo.")
                     logo_path = None
 
+            # Download background music if provided
+            music_path = None
+            if request.music_url:
+                logger.info(f"Downloading background music from: {request.music_url}")
+                extension = get_audio_extension_from_url(request.music_url)
+                music_path = request_dir / f"music{extension}"
+
+                success = await download_audio_from_url(session, request.music_url, music_path)
+
+                if not success:
+                    logger.warning(f"Failed to download music. Continuing without background music.")
+                    music_path = None
+
         # Generate output video
         output_filename = f"inspix_{request_id}.mp4"
         output_path = OUTPUT_DIR / output_filename
@@ -1462,7 +1514,8 @@ async def generate_inspix_video(request: VideoGenerationRequest):
             style_names=request.style_names,
             logo_path=logo_path,
             cta_text=request.custom_cta_text,
-            fps=24  # Reduced from 30 for memory efficiency
+            fps=24,  # Reduced from 30 for memory efficiency
+            music_path=music_path
         )
 
         if not success:
@@ -1497,7 +1550,8 @@ async def generate_inspix_video(request: VideoGenerationRequest):
             "fps": 24,
             "format": "mp4",
             "codec": "H.264 (CRF 30)",
-            "audio": "AAC 64k (silent)",
+            "audio": "AAC 128k (background music)" if music_path else "AAC 64k (silent)",
+            "background_music_added": music_path is not None,
             "images_processed": {
                 "original": 1,
                 "results": len(result_image_paths),
