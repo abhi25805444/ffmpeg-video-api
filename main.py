@@ -45,18 +45,18 @@ OUTPUT_DIR = Path("outputs")
 UPLOAD_DIR.mkdir(exist_ok=True)
 OUTPUT_DIR.mkdir(exist_ok=True)
 
-# Configuration - Extreme optimization for 512MB memory
-MAX_FILE_SIZE = 3 * 1024 * 1024  # 3MB per file (extreme reduction)
-MAX_IMAGES = 4  # Reduced to 4 for extreme memory constraints
+# Configuration - High quality video settings
+MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB per file for higher quality
+MAX_IMAGES = 4  # Maximum 4 images
 SUPPORTED_IMAGE_FORMATS = {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp"}
 SUPPORTED_AUDIO_FORMATS = {".mp3", ".wav", ".m4a", ".aac", ".ogg"}
 MAX_URL_LENGTH = 2048
-MIN_IMAGE_DIMENSION = 480  # Further reduced for memory
+MIN_IMAGE_DIMENSION = 720  # Higher minimum for better quality
 DOWNLOAD_TIMEOUT = 60  # seconds
-VIDEO_TIMEOUT = 120  # seconds for video processing
-DOWNLOAD_CHUNK_SIZE = 2048  # Extremely small chunks
-VIDEO_WIDTH = 720  # Reduced from 1080
-VIDEO_HEIGHT = 1280  # Reduced from 1920
+VIDEO_TIMEOUT = 180  # seconds for video processing (increased for higher quality)
+DOWNLOAD_CHUNK_SIZE = 8192  # Larger chunks for faster download
+VIDEO_WIDTH = 1080  # Full HD width
+VIDEO_HEIGHT = 1920  # Full HD height
 
 # Pydantic models for the new endpoint
 class VideoGenerationRequest(BaseModel):
@@ -308,12 +308,12 @@ def escape_ffmpeg_text(text: str) -> str:
     text = text.replace("]", "\\]")
     return text
 
-def get_memory_optimized_ffmpeg_flags() -> list:
-    """Get FFmpeg flags optimized for extreme low memory (512MB)"""
+def get_high_quality_ffmpeg_flags() -> list:
+    """Get FFmpeg flags optimized for high quality output"""
     return [
-        "-max_muxing_queue_size", "512",  # Reduce muxing queue
-        "-bufsize", "256k",  # Limit buffer size
-        "-maxrate", "1M",  # Limit bitrate
+        "-max_muxing_queue_size", "1024",  # Larger muxing queue for quality
+        "-bufsize", "2M",  # Larger buffer size
+        "-maxrate", "8M",  # Higher bitrate for better quality
     ]
 
 def auto_generate_prompt_preview(result_count: int) -> str:
@@ -350,13 +350,13 @@ def create_hook_grid(result_images: List[Path], output_path: Path, fps: int = 30
                 cell_video = temp_dir / f"cell_{i}.mp4"
                 cell_videos.append(cell_video)
 
-                # Reduced resolution: 720x1280 grid cells = 360x640 each
+                # Full HD resolution: 1080x1920 grid cells = 540x960 each
                 video_filter = (
-                    f"scale=396:704:force_original_aspect_ratio=increase,"  # Scale to 1.1x size
-                    f"crop=360:640"  # Crop to cell size (720/2 x 1280/2)
+                    f"scale=594:1056:force_original_aspect_ratio=increase,"  # Scale to 1.1x size
+                    f"crop=540:960"  # Crop to cell size (1080/2 x 1920/2)
                 )
 
-                memory_flags = get_memory_optimized_ffmpeg_flags()
+                memory_flags = get_high_quality_ffmpeg_flags()
 
                 cmd = [
                     "ffmpeg", "-y",
@@ -366,8 +366,8 @@ def create_hook_grid(result_images: List[Path], output_path: Path, fps: int = 30
                     "-vf", video_filter,
                     "-c:v", "libx264",
                     "-pix_fmt", "yuv420p",
-                    "-preset", "ultrafast",
-                    "-crf", "30",  # Increased from 28 for smaller files
+                    "-preset", "medium",
+                    "-crf", "18",  # Near lossless quality
                     "-r", str(fps),
                     "-threads", "1",  # Reduced from 2
                 ] + memory_flags + [
@@ -395,7 +395,7 @@ def create_hook_grid(result_images: List[Path], output_path: Path, fps: int = 30
                 f"[top][bottom]vstack=inputs=2[v]"
             )
 
-            memory_flags = get_memory_optimized_ffmpeg_flags()
+            memory_flags = get_high_quality_ffmpeg_flags()
 
             cmd = [
                 "ffmpeg", "-y",
@@ -407,8 +407,8 @@ def create_hook_grid(result_images: List[Path], output_path: Path, fps: int = 30
                 "-map", "[v]",
                 "-c:v", "libx264",
                 "-pix_fmt", "yuv420p",
-                "-preset", "ultrafast",
-                "-crf", "30",
+                "-preset", "medium",
+                "-crf", "18",
                 "-r", str(fps),
                 "-t", "1",
                 "-threads", "1",
@@ -451,18 +451,18 @@ def create_original_photo_segment(original_image: Path, output_path: Path, fps: 
 
         text = escape_ffmpeg_text("This Photo +")
 
-        # Reduced to 720x1280 for memory efficiency
+        # Full HD resolution 1080x1920 for high quality
         video_filter = (
             f"scale={VIDEO_WIDTH}:{VIDEO_HEIGHT}:force_original_aspect_ratio=decrease,"
             f"pad={VIDEO_WIDTH}:{VIDEO_HEIGHT}:(ow-iw)/2:(oh-ih)/2:black,"
             f"fade=t=in:st=0:d=0.5,"
             f"drawtext=text='{text}':"
-            f"fontfile=/Windows/Fonts/arialbd.ttf:fontsize=54:fontcolor=white:"
-            f"borderw=3:bordercolor=black:"
-            f"x=(w-text_w)/2:y=(h-text_h)/2+200"
+            f"fontfile=/Windows/Fonts/arialbd.ttf:fontsize=80:fontcolor=white:"
+            f"borderw=4:bordercolor=black:"
+            f"x=(w-text_w)/2:y=(h-text_h)/2+300"
         )
 
-        memory_flags = get_memory_optimized_ffmpeg_flags()
+        memory_flags = get_high_quality_ffmpeg_flags()
 
         cmd = [
             "ffmpeg", "-y",
@@ -472,8 +472,8 @@ def create_original_photo_segment(original_image: Path, output_path: Path, fps: 
             "-vf", video_filter,
             "-c:v", "libx264",
             "-pix_fmt", "yuv420p",
-            "-preset", "ultrafast",
-            "-crf", "30",
+            "-preset", "medium",
+            "-crf", "18",
             "-r", str(fps),
             "-threads", "1",
         ] + memory_flags + [
@@ -505,22 +505,22 @@ def create_prompt_tease_segment(original_image: Path, prompt_text: str, output_p
         text1 = escape_ffmpeg_text("+ inspix Prompt =")
         text2 = escape_ffmpeg_text(prompt_text)
 
-        # Reduced to 720x1280 with proportional font sizes
+        # Full HD resolution 1080x1920 with high quality font sizes
         video_filter = (
             f"scale={VIDEO_WIDTH}:{VIDEO_HEIGHT}:force_original_aspect_ratio=decrease,"
             f"pad={VIDEO_WIDTH}:{VIDEO_HEIGHT}:(ow-iw)/2:(oh-ih)/2:black,"
             f"eq=brightness=-0.3,"
             f"drawtext=text='{text1}':"
-            f"fontfile=/Windows/Fonts/arialbd.ttf:fontsize=42:fontcolor=white:"
-            f"borderw=2:bordercolor=black:"
-            f"x=(w-text_w)/2:y=(h)/2-70,"
+            f"fontfile=/Windows/Fonts/arialbd.ttf:fontsize=64:fontcolor=white:"
+            f"borderw=3:bordercolor=black:"
+            f"x=(w-text_w)/2:y=(h)/2-105,"
             f"drawtext=text='{text2}':"
-            f"fontfile=/Windows/Fonts/arialbd.ttf:fontsize=32:fontcolor=white:"
-            f"borderw=2:bordercolor=black:"
-            f"x=(w-text_w)/2:y=(h)/2+35"
+            f"fontfile=/Windows/Fonts/arialbd.ttf:fontsize=48:fontcolor=white:"
+            f"borderw=3:bordercolor=black:"
+            f"x=(w-text_w)/2:y=(h)/2+52"
         )
 
-        memory_flags = get_memory_optimized_ffmpeg_flags()
+        memory_flags = get_high_quality_ffmpeg_flags()
 
         cmd = [
             "ffmpeg", "-y",
@@ -530,8 +530,8 @@ def create_prompt_tease_segment(original_image: Path, prompt_text: str, output_p
             "-vf", video_filter,
             "-c:v", "libx264",
             "-pix_fmt", "yuv420p",
-            "-preset", "ultrafast",
-            "-crf", "30",
+            "-preset", "medium",
+            "-crf", "18",
             "-r", str(fps),
             "-threads", "1",
         ] + memory_flags + [
@@ -590,22 +590,22 @@ def create_results_showcase(
                 text_style = escape_ffmpeg_text(f"Style\\: {style_name}")
                 text_counter = escape_ffmpeg_text(counter_text)
 
-                # Reduced to 720x1280 with proportional font sizes
+                # Full HD resolution 1080x1920 with high quality font sizes
                 video_filter = (
                     f"scale={VIDEO_WIDTH}:{VIDEO_HEIGHT}:force_original_aspect_ratio=increase,"
                     f"crop={VIDEO_WIDTH}:{VIDEO_HEIGHT},"
                     f"fade=t=in:st=0:d=0.3,"
                     f"drawtext=text='{text_style}':"
-                    f"fontfile=/Windows/Fonts/arialbd.ttf:fontsize=42:fontcolor=white:"
-                    f"borderw=2:bordercolor=black:"
-                    f"x=(w-text_w)/2:y=70,"
+                    f"fontfile=/Windows/Fonts/arialbd.ttf:fontsize=64:fontcolor=white:"
+                    f"borderw=3:bordercolor=black:"
+                    f"x=(w-text_w)/2:y=105,"
                     f"drawtext=text='{text_counter}':"
-                    f"fontfile=/Windows/Fonts/arialbd.ttf:fontsize=32:fontcolor=white:"
-                    f"borderw=2:bordercolor=black:"
-                    f"x=(w-text_w)/2:y=h-100"
+                    f"fontfile=/Windows/Fonts/arialbd.ttf:fontsize=48:fontcolor=white:"
+                    f"borderw=3:bordercolor=black:"
+                    f"x=(w-text_w)/2:y=h-150"
                 )
 
-                memory_flags = get_memory_optimized_ffmpeg_flags()
+                memory_flags = get_high_quality_ffmpeg_flags()
 
                 cmd = [
                     "ffmpeg", "-y",
@@ -615,8 +615,8 @@ def create_results_showcase(
                     "-vf", video_filter,
                     "-c:v", "libx264",
                     "-pix_fmt", "yuv420p",
-                    "-preset", "ultrafast",
-                    "-crf", "30",
+                    "-preset", "medium",
+                    "-crf", "18",
                     "-r", str(fps),
                     "-threads", "1",
                 ] + memory_flags + [
@@ -663,7 +663,7 @@ def create_results_showcase(
 
                 filter_complex = ";".join(filter_parts)
 
-                memory_flags = get_memory_optimized_ffmpeg_flags()
+                memory_flags = get_high_quality_ffmpeg_flags()
 
                 cmd = [
                     "ffmpeg", "-y"
@@ -672,8 +672,8 @@ def create_results_showcase(
                     "-map", "[v]",
                     "-c:v", "libx264",
                     "-pix_fmt", "yuv420p",
-                    "-preset", "ultrafast",
-                    "-crf", "30",
+                    "-preset", "medium",
+                    "-crf", "18",
                     "-r", str(fps),
                     "-threads", "1",
                 ] + memory_flags + [
@@ -717,8 +717,8 @@ def create_branding_segment(last_result_image: Path, logo_path: Optional[Path], 
 
         text = escape_ffmpeg_text("500+ Prompts Ready")
 
-        # Reduced to 720x1280 with proportional logo
-        memory_flags = get_memory_optimized_ffmpeg_flags()
+        # Full HD resolution 1080x1920 with high quality logo
+        memory_flags = get_high_quality_ffmpeg_flags()
 
         # Add logo overlay if provided
         if logo_path and logo_path.exists():
@@ -728,18 +728,18 @@ def create_branding_segment(last_result_image: Path, logo_path: Optional[Path], 
                 "-loop", "1", "-t", "2", "-i", str(logo_path),
                 "-filter_complex",
                 f"[0:v]scale={VIDEO_WIDTH}:{VIDEO_HEIGHT}:force_original_aspect_ratio=increase,crop={VIDEO_WIDTH}:{VIDEO_HEIGHT},eq=brightness=-0.2,fade=t=in:st=0:d=0.5[bg];"
-                f"[1:v]scale=80:80:force_original_aspect_ratio=decrease,format=rgba,colorchannelmixer=aa=0.85[logo];"
-                f"[bg][logo]overlay=W-w-30:30[v1];"
+                f"[1:v]scale=120:120:force_original_aspect_ratio=decrease,format=rgba,colorchannelmixer=aa=0.85[logo];"
+                f"[bg][logo]overlay=W-w-45:45[v1];"
                 f"[v1]drawtext=text='{text}':"
-                f"fontfile=/Windows/Fonts/arialbd.ttf:fontsize=48:fontcolor=white:"
-                f"borderw=3:bordercolor=black:"
+                f"fontfile=/Windows/Fonts/arialbd.ttf:fontsize=72:fontcolor=white:"
+                f"borderw=4:bordercolor=black:"
                 f"x=(w-text_w)/2:y=(h-text_h)/2:"
                 f"alpha='if(lt(t,0.5),t/0.5,1)'[v]",
                 "-map", "[v]",
                 "-c:v", "libx264",
                 "-pix_fmt", "yuv420p",
-                "-preset", "ultrafast",
-                "-crf", "30",
+                "-preset", "medium",
+                "-crf", "18",
                 "-r", str(fps),
                 "-t", "2",
                 "-threads", "1",
@@ -753,8 +753,8 @@ def create_branding_segment(last_result_image: Path, logo_path: Optional[Path], 
                 f"eq=brightness=-0.2,"
                 f"fade=t=in:st=0:d=0.5,"
                 f"drawtext=text='{text}':"
-                f"fontfile=/Windows/Fonts/arialbd.ttf:fontsize=48:fontcolor=white:"
-                f"borderw=3:bordercolor=black:"
+                f"fontfile=/Windows/Fonts/arialbd.ttf:fontsize=72:fontcolor=white:"
+                f"borderw=4:bordercolor=black:"
                 f"x=(w-text_w)/2:y=(h-text_h)/2:"
                 f"alpha='if(lt(t,0.5),t/0.5,1)'"
             )
@@ -766,8 +766,8 @@ def create_branding_segment(last_result_image: Path, logo_path: Optional[Path], 
                 "-vf", video_filter,
                 "-c:v", "libx264",
                 "-pix_fmt", "yuv420p",
-                "-preset", "ultrafast",
-                "-crf", "30",
+                "-preset", "medium",
+                "-crf", "18",
                 "-r", str(fps),
                 "-threads", "1",
             ] + memory_flags + [
@@ -799,8 +799,8 @@ def create_cta_segment(last_result_image: Path, cta_text: str, logo_path: Option
 
         text = escape_ffmpeg_text(cta_text)
 
-        # Reduced to 720x1280 with proportional text and logo
-        memory_flags = get_memory_optimized_ffmpeg_flags()
+        # Full HD resolution 1080x1920 with high quality text and logo
+        memory_flags = get_high_quality_ffmpeg_flags()
 
         base_filter = (
             f"scale={VIDEO_WIDTH}:{VIDEO_HEIGHT}:force_original_aspect_ratio=increase,"
@@ -810,8 +810,8 @@ def create_cta_segment(last_result_image: Path, cta_text: str, logo_path: Option
 
         text_filter = (
             f"drawtext=text='{text}':"
-            f"fontfile=/Windows/Fonts/arialbd.ttf:fontsize=54:fontcolor=white:"
-            f"borderw=3:bordercolor=black:"
+            f"fontfile=/Windows/Fonts/arialbd.ttf:fontsize=80:fontcolor=white:"
+            f"borderw=4:bordercolor=black:"
             f"x=(w-text_w)/2:y=(h-text_h)/2"
         )
 
@@ -822,14 +822,14 @@ def create_cta_segment(last_result_image: Path, cta_text: str, logo_path: Option
                 "-loop", "1", "-t", "1", "-i", str(logo_path),
                 "-filter_complex",
                 f"[0:v]{base_filter}[bg];"
-                f"[1:v]scale=80:80:force_original_aspect_ratio=decrease,format=rgba,colorchannelmixer=aa=0.85[logo];"
-                f"[bg][logo]overlay=W-w-30:30[v1];"
+                f"[1:v]scale=120:120:force_original_aspect_ratio=decrease,format=rgba,colorchannelmixer=aa=0.85[logo];"
+                f"[bg][logo]overlay=W-w-45:45[v1];"
                 f"[v1]{text_filter}[v]",
                 "-map", "[v]",
                 "-c:v", "libx264",
                 "-pix_fmt", "yuv420p",
-                "-preset", "ultrafast",
-                "-crf", "30",
+                "-preset", "medium",
+                "-crf", "18",
                 "-r", str(fps),
                 "-t", "1",
                 "-threads", "1",
@@ -845,8 +845,8 @@ def create_cta_segment(last_result_image: Path, cta_text: str, logo_path: Option
                 "-vf", f"{base_filter},{text_filter}",
                 "-c:v", "libx264",
                 "-pix_fmt", "yuv420p",
-                "-preset", "ultrafast",
-                "-crf", "30",
+                "-preset", "medium",
+                "-crf", "18",
                 "-r", str(fps),
                 "-threads", "1",
             ] + memory_flags + [
@@ -939,7 +939,7 @@ def create_video_from_images(
                     "-vf", video_filter,
                     "-c:v", "libx264",
                     "-pix_fmt", "yuv420p",
-                    "-preset", "ultrafast",
+                    "-preset", "medium",
                     "-crf", "28",
                     "-r", str(fps),
                     "-movflags", "+faststart",
@@ -1035,7 +1035,7 @@ def create_video_from_images(
                         "-vf", video_filter,
                         "-c:v", "libx264",
                         "-pix_fmt", "yuv420p",
-                        "-preset", "ultrafast",
+                        "-preset", "medium",
                         "-crf", "28",
                         "-r", str(fps),
                         "-an",
@@ -1121,7 +1121,7 @@ def create_inspix_video(
     Optional background music will be added if music_path is provided.
     """
     try:
-        logger.info("Creating inspix video with timeline segments")
+        logger.info("Creating high quality inspix video with timeline segments")
 
         # Create temp directory for segments
         temp_dir = output_path.parent / f"segments_{uuid.uuid4().hex[:8]}"
@@ -1197,7 +1197,7 @@ def create_inspix_video(
                     f.write(f"file '{segment_path}'\n")
 
             # Concatenate with audio track (either background music or silent)
-            memory_flags = get_memory_optimized_ffmpeg_flags()
+            memory_flags = get_high_quality_ffmpeg_flags()
 
             if music_path and music_path.exists():
                 # Use provided background music, loop it to match video duration
@@ -1213,8 +1213,8 @@ def create_inspix_video(
                     "-c:a", "aac",
                     "-b:a", "128k",  # Higher quality for background music
                     "-pix_fmt", "yuv420p",
-                    "-preset", "ultrafast",
-                    "-crf", "30",
+                    "-preset", "medium",
+                    "-crf", "18",
                     "-shortest",  # End when video ends
                     "-map", "0:v:0",  # Video from first input
                     "-map", "1:a:0",  # Audio from second input
@@ -1237,8 +1237,8 @@ def create_inspix_video(
                     "-c:a", "aac",
                     "-b:a", "64k",  # Reduced from 96k
                     "-pix_fmt", "yuv420p",
-                    "-preset", "ultrafast",
-                    "-crf", "30",
+                    "-preset", "medium",
+                    "-crf", "18",
                     "-shortest",
                     "-movflags", "+faststart",
                     "-threads", "1",
@@ -1355,16 +1355,16 @@ async def generate_inspix_video(request: VideoGenerationRequest):
     [12-14s] Branding - Show branding message with logo
     [14-15s] Call-to-Action - Display CTA text
 
-    Technical Specs (EXTREME optimization for 512MB memory):
-    - Resolution: 720x1280 (9:16) - Reduced for memory
-    - Frame Rate: 24fps (reduced for memory efficiency)
-    - Codec: H.264 (libx264, ultrafast preset, CRF 30)
+    Technical Specs (HIGH QUALITY):
+    - Resolution: 1080x1920 (Full HD 9:16 portrait)
+    - Frame Rate: 30fps (smooth playback)
+    - Codec: H.264 (libx264, medium preset, CRF 18 - near lossless quality)
     - Audio: Background music (128k AAC) if music_url provided, otherwise silent AAC track 64k
     - Duration: Exactly 15 seconds
-    - Max Images: 4 result images (memory constraint)
-    - Max File Size: 3MB per image/audio
-    - Threads: 1 (prevents memory spikes)
-    - Memory flags: bufsize 256k, maxrate 1M
+    - Max Images: 4 result images
+    - Max File Size: 10MB per image/audio
+    - Bitrate: Up to 8M for high quality
+    - Buffer Size: 2M for smooth encoding
     - Background Music: Optional music_url parameter for custom background music (will be looped to match video duration)
     """
 
@@ -1505,7 +1505,7 @@ async def generate_inspix_video(request: VideoGenerationRequest):
         output_filename = f"inspix_{request_id}.mp4"
         output_path = OUTPUT_DIR / output_filename
 
-        logger.info("Starting video generation (low memory mode)")
+        logger.info("Starting video generation (high quality mode)")
         success = create_inspix_video(
             original_image=original_image_path,
             result_images=result_image_paths,
@@ -1514,7 +1514,7 @@ async def generate_inspix_video(request: VideoGenerationRequest):
             style_names=request.style_names,
             logo_path=logo_path,
             cta_text=request.custom_cta_text,
-            fps=24,  # Reduced from 30 for memory efficiency
+            fps=30,  # High quality smooth playback
             music_path=music_path
         )
 
@@ -1540,16 +1540,17 @@ async def generate_inspix_video(request: VideoGenerationRequest):
 
         # Return success response
         return {
-            "message": "Inspix video created successfully (low memory mode)",
+            "message": "Inspix video created successfully (HIGH QUALITY)",
             "video_id": request_id,
             "download_url": f"/download/{output_filename}",
             "file_size": file_size,
             "file_size_mb": round(file_size_mb, 2),
             "duration_seconds": 15,
-            "resolution": "720x1280",
-            "fps": 24,
+            "resolution": "1080x1920",
+            "fps": 30,
             "format": "mp4",
-            "codec": "H.264 (CRF 30)",
+            "codec": "H.264 (CRF 18 - Near Lossless)",
+            "preset": "medium",
             "audio": "AAC 128k (background music)" if music_path else "AAC 64k (silent)",
             "background_music_added": music_path is not None,
             "images_processed": {
@@ -1557,7 +1558,7 @@ async def generate_inspix_video(request: VideoGenerationRequest):
                 "results": len(result_image_paths),
                 "logo": 1 if logo_path else 0
             },
-            "optimization": "512MB memory mode"
+            "quality": "High Quality Full HD"
         }
 
     except HTTPException:
@@ -1773,3 +1774,5 @@ if __name__ == "__main__":
         timeout_keep_alive=300,  # 5 minutes for long-running video processing
         timeout_graceful_shutdown=30
     )
+
+
