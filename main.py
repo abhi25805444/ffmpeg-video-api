@@ -810,8 +810,7 @@ def create_cta_segment(last_result_image: Path, cta_text: str, logo_path: Option
             f"drawtext=text='{text}':"
             f"fontfile=/Windows/Fonts/arialbd.ttf:fontsize=54:fontcolor=white:"
             f"borderw=3:bordercolor=black:"
-            f"x=(w-text_w)/2:y=(h-text_h)/2:"
-            f"font_color_expr='ffffff'"
+            f"x=(w-text_w)/2:y=(h-text_h)/2"
         )
 
         if logo_path and logo_path.exists():
@@ -822,8 +821,9 @@ def create_cta_segment(last_result_image: Path, cta_text: str, logo_path: Option
                 "-filter_complex",
                 f"[0:v]{base_filter}[bg];"
                 f"[1:v]scale=80:80:force_original_aspect_ratio=decrease,format=rgba,colorchannelmixer=aa=0.85[logo];"
-                f"[bg][logo]overlay=W-w-30:30[v];"
-                f"[v]{text_filter}",
+                f"[bg][logo]overlay=W-w-30:30[v1];"
+                f"[v1]{text_filter}[v]",
+                "-map", "[v]",
                 "-c:v", "libx264",
                 "-pix_fmt", "yuv420p",
                 "-preset", "ultrafast",
