@@ -1187,7 +1187,8 @@ def create_inspix_video(
             concat_file = temp_dir / "concat.txt"
             with open(concat_file, 'w') as f:
                 for segment in segments:
-                    segment_path = str(segment).replace('\\', '/')
+                    # Use absolute path to avoid FFmpeg path resolution issues
+                    segment_path = str(segment.resolve()).replace('\\', '/')
                     f.write(f"file '{segment_path}'\n")
 
             # Concatenate with silent AAC audio track for Instagram
